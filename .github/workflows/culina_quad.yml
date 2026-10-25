@@ -1,4 +1,4 @@
-name: Culina ROManitatis
+name: Quad4Sefi
 
 run-name: "Culina build · ${{ inputs.TARGET_DEVICE }} → ${{ inputs.STOCK_DEVICE }}"
 
