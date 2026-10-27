@@ -23,6 +23,15 @@ on:
         required: true
         default: "False"
 
+      FIRMWARE_SOURCE_TYPE:
+        description: "Firmware source type. Non-Samsung support is experimental and requires a compatible direct archive URL."
+        type: choice
+        options:
+          - Samsung
+          - Other OEM (direct archive URL)
+        required: true
+        default: Samsung
+
       TARGET_DEVICE:
         description: "TARGET_DEVICE_MODEL."
         required: true
@@ -107,6 +116,7 @@ jobs:
         env:
           INPUT_STOCK_DEVICE: ${{ inputs.STOCK_DEVICE }}
           INPUT_TARGET_DEVICE: ${{ inputs.TARGET_DEVICE }}
+          INPUT_FIRMWARE_SOURCE_TYPE: ${{ inputs.FIRMWARE_SOURCE_TYPE }}
           INPUT_TARGET_CSC: ${{ inputs.TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK }}
           INPUT_TARGET_FW_VERSION: ${{ inputs.TARGET_FW_VERSION }}
           INPUT_USE_UI_8_TETHERING_APEX: ${{ inputs.USE_UI_8_TETHERING_APEX }}
@@ -136,6 +146,7 @@ jobs:
           {
             echo "STOCK_DEVICE=$INPUT_STOCK_DEVICE"
             echo "TARGET_DEVICE=$INPUT_TARGET_DEVICE"
+            echo "FIRMWARE_SOURCE_TYPE=$INPUT_FIRMWARE_SOURCE_TYPE"
             echo "TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK=$INPUT_TARGET_CSC"
             echo "TARGET_FW_VERSION=$INPUT_TARGET_FW_VERSION"
             echo "FIRM_DIR=$GITHUB_WORKSPACE/FW/$INPUT_TARGET_DEVICE"
@@ -210,8 +221,24 @@ jobs:
 
       - name: Download firmware ▶️ ${{ inputs.TARGET_DEVICE }} - ${{ inputs.TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK }}
         run: |
+          set -euo pipefail
           source "$(pwd)/scripts/QuantumRom.sh"
-          DOWNLOAD_FIRMWARE "$TARGET_DEVICE" "$TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK" "$FIRM_DIR" "$TARGET_FW_VERSION"
+          if [ "$FIRMWARE_SOURCE_TYPE" = "Samsung" ]; then
+            DOWNLOAD_FIRMWARE "$TARGET_DEVICE" "$TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK" "$FIRM_DIR" "$TARGET_FW_VERSION"
+          else
+            URL="$TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK"
+            if [[ ! "$URL" =~ ^https?:// ]]; then
+              echo "Other OEM mode requires a direct HTTPS/HTTP firmware archive URL in TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK." >&2
+              exit 1
+            fi
+            mkdir -p "$FIRM_DIR"
+            curl -fL --retry 3 --retry-delay 2 "$URL" -o "$FIRM_DIR/firmware-download"
+            if [ ! -s "$FIRM_DIR/firmware-download" ]; then
+              echo "Firmware download is empty." >&2
+              exit 1
+            fi
+            echo "Downloaded other-OEM firmware archive. The archive must be extractable by 7-Zip/tar and contain compatible Android partition images."
+          fi
 
       - name: Install Dependencies.
         run: |
@@ -258,7 +285,20 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$FIRM_DIR" && chmod -R u+rwX "$FIRM_DIR"
           rm -rf "$FIRM_DIR"/*.img
 
+      - name: Validate extracted Android partitions
+        if: inputs.FIRMWARE_SOURCE_TYPE == 'Other OEM (direct archive URL)'
+        run: |
+          set -euo pipefail
+          echo "Checking extracted partition layout for a usable Android system image..."
+          if [ ! -d "$FIRM_DIR/system" ] && [ ! -f "$FIRM_DIR/system.img" ]; then
+            echo "No system directory or system.img found after extraction. This archive is not compatible with the current Quad4Sefi image pipeline." >&2
+            find "$FIRM_DIR" -maxdepth 2 -type f | head -80
+            exit 1
+          fi
+          echo "Partition presence check passed. This is not a compatibility guarantee: vendor-specific framework, init, SELinux, HAL, kernel and device-tree differences still require manual porting."
+
       - name: Debloat Rom - ${{ inputs.DEBLOAT_ROM }}
+        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
         run: |
           source "$(pwd)/scripts/debloat.sh"
 
@@ -275,6 +315,7 @@ jobs:
           fi
 
       - name: Apply stock device configuration
+        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
         run: |
           source "$(pwd)/scripts/debloat.sh"
           source "$(pwd)/scripts/QuantumRom.sh"
@@ -288,6 +329,7 @@ jobs:
           fi
 
       - name: Add china smart manager - ${{ inputs.ADD_CHINA_SMART_MANAGER }}
+        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
 
@@ -296,6 +338,7 @@ jobs:
           fi
 
       - name: Add samsung flagship apps - ${{ inputs.ADD_SAMSUNG_FLAGSHIP_APPS }}
+        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
 
@@ -304,6 +347,7 @@ jobs:
           fi
 
       - name: Add custom features - ${{ inputs.ADD_CUSTOM_FEATURES }}
+        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
 
@@ -312,6 +356,7 @@ jobs:
           fi
 
       - name: Patch flag secure and secure folder - ${{ inputs.PATCH_FLAG_SECURE }} - ${{ inputs.PATCH_SECURE_FOLDER }}
+        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
 
@@ -334,6 +379,7 @@ jobs:
           fi
 
       - name: Patch bluetooth library- ${{ inputs.PATCH_BLUETOOTH_LIBRARY }}
+        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
 
@@ -344,8 +390,12 @@ jobs:
       - name: Apply others features and patch
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
-          PATCH_SELINUX "$FIRM_DIR"
-          DISABLE_SECURITY "$FIRM_DIR"
+          if [ "$FIRMWARE_SOURCE_TYPE" = "Samsung" ]; then
+            PATCH_SELINUX "$FIRM_DIR"
+            DISABLE_SECURITY "$FIRM_DIR"
+          else
+            echo "Skipping Samsung-specific SELinux/security patches for non-Samsung firmware."
+          fi
 
       - name: Build img - ${{ inputs.OUTPUT_FILESYSTEM }}
         run: |
@@ -410,8 +460,12 @@ jobs:
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
           export ANDROID_VERSION=$(GET_PROP "$FIRM_DIR" "system" "ro.system.build.version.release")
-          ONEUI_VERSION=$(GET_PROP "$FIRM_DIR" "system" "ro.build.version.oneui")
-          export ONEUI_VERSION="$((ONEUI_VERSION / 10000)).$(((ONEUI_VERSION / 100) % 100))"
+          if [ "$FIRMWARE_SOURCE_TYPE" = "Samsung" ]; then
+            ONEUI_VERSION=$(GET_PROP "$FIRM_DIR" "system" "ro.build.version.oneui")
+            export ONEUI_VERSION="$((ONEUI_VERSION / 10000)).$(((ONEUI_VERSION / 100) % 100))"
+          else
+            export ONEUI_VERSION="N/A (non-Samsung source)"
+          fi
           export BUILD_VERSION=$(GET_PROP "$FIRM_DIR" "system" "ro.build.version.incremental")
           export SDK_VERSION=$(GET_PROP "$FIRM_DIR" "system" "ro.system.build.version.sdk")
           export SECURITY_PATCH=$(GET_PROP "$FIRM_DIR" "system" "ro.build.version.security_patch")
