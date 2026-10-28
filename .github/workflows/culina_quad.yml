@@ -1,6 +1,6 @@
 name: Quad4Sefi
 
-run-name: "Culina build · ${{ inputs.TARGET_DEVICE }} → ${{ inputs.STOCK_DEVICE }}"
+run-name: "OriginOS donor ${{ inputs.TARGET_DEVICE }} → Samsung target ${{ inputs.STOCK_DEVICE }}"
 
 permissions:
   contents: write
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       STOCK_DEVICE:
-        description: "Your own device model or None"
+        description: "STOCK DEVICE = Samsung destination that receives the port (for example SM-P613)."
         required: true
         default: "SM-P613"
 
@@ -24,26 +24,25 @@ on:
         default: "False"
 
       FIRMWARE_SOURCE_TYPE:
-        description: "Firmware source type. Non-Samsung support is experimental and requires a compatible direct archive URL."
+        description: "Only OriginOS firmware is accepted as the donor source."
         type: choice
         options:
-          - Samsung
-          - Other OEM (direct archive URL)
+          - OriginOS (direct archive URL)
         required: true
-        default: Samsung
+        default: "OriginOS (direct archive URL)"
 
       TARGET_DEVICE:
-        description: "TARGET_DEVICE_MODEL."
+        description: "TARGET DEVICE = OriginOS donor/source phone model (the device firmware is taken FROM). For example VxxxxA or another OriginOS model; not the Samsung destination."
         required: true
         default: "SM-X710"
 
       TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK:
-        description: "Input target device CSC code or direct download link."
+        description: "OriginOS donor firmware archive URL for TARGET_DEVICE (source firmware, not the Samsung destination firmware)."
         required: true
-        default: "EUX"
+        default: "https://example.invalid/originos-firmware-archive.zip"
 
       TARGET_FW_VERSION:
-        description: "Specific Samsung firmware version (PDA/CSC/MODEM) OR (AP/CSC/CP)"
+        description: "Not used for OriginOS donor archives; leave blank."
         required: false
 
       OUTPUT_FILESYSTEM:
@@ -140,7 +139,23 @@ jobs:
           case "$INPUT_OUTPUT_FILESYSTEM" in erofs|ext4|f2fs) ;; *) echo "Unsupported OUTPUT_FILESYSTEM: $INPUT_OUTPUT_FILESYSTEM" >&2; exit 1 ;; esac
           case "$INPUT_COMPRESS_IMG" in ''|xz|br) ;; *) echo "Unsupported COMPRESS_IMG: $INPUT_COMPRESS_IMG (expected blank, xz, or br)" >&2; exit 1 ;; esac
           if [[ -z "$INPUT_STOCK_DEVICE" || -z "$INPUT_TARGET_DEVICE" || -z "$INPUT_TARGET_CSC" ]]; then
-            echo "STOCK_DEVICE, TARGET_DEVICE, and target CSC/download link must not be empty." >&2
+            echo "Samsung destination (STOCK_DEVICE), OriginOS donor/source model (TARGET_DEVICE), and donor firmware archive URL must not be empty." >&2
+            exit 1
+          fi
+          if [[ "$INPUT_FIRMWARE_SOURCE_TYPE" != "OriginOS (direct archive URL)" ]]; then
+            echo "This workflow only accepts OriginOS firmware as the donor source." >&2
+            exit 1
+          fi
+          if [[ ! "$INPUT_STOCK_DEVICE" =~ ^SM-[A-Za-z0-9-]+$ ]]; then
+            echo "STOCK_DEVICE is the Samsung destination and must begin with SM- (for example SM-P613)." >&2
+            exit 1
+          fi
+          if [[ ! "$INPUT_TARGET_CSC" =~ ^https:// ]]; then
+            echo "Provide a direct HTTPS URL to an OriginOS firmware archive." >&2
+            exit 1
+          fi
+          if [[ "$INPUT_TARGET_DEVICE" =~ ^(SM-|GT-) ]]; then
+            echo "TARGET_DEVICE is the OriginOS donor/source (port FROM), so it must not be a Samsung model." >&2
             exit 1
           fi
           {
@@ -172,12 +187,12 @@ jobs:
       - name: Show build configuration
         run: |
           {
-            echo "## Culina build configuration"
+            echo "## OriginOS-to-Samsung build configuration"
             echo
             echo "| Setting | Value |"
             echo "|---|---|"
-            echo "| Source device | \`$STOCK_DEVICE\` |"
-            echo "| Target device | \`$TARGET_DEVICE\` |"
+            echo "| OriginOS donor / port FROM (TARGET_DEVICE) | \`$TARGET_DEVICE\` |"
+            echo "| Samsung destination / port TO (STOCK_DEVICE) | \`$STOCK_DEVICE\` |"
             echo "| CSC / download source | \`$TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK\` |"
             echo "| Filesystem | \`$OUTPUT_FILESYSTEM\` |"
             echo "| Image compression | \`${COMPRESS_IMG:-none}\` |"
@@ -223,22 +238,22 @@ jobs:
         run: |
           set -euo pipefail
           source "$(pwd)/scripts/QuantumRom.sh"
-          if [ "$FIRMWARE_SOURCE_TYPE" = "Samsung" ]; then
-            DOWNLOAD_FIRMWARE "$TARGET_DEVICE" "$TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK" "$FIRM_DIR" "$TARGET_FW_VERSION"
-          else
-            URL="$TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK"
-            if [[ ! "$URL" =~ ^https?:// ]]; then
-              echo "Other OEM mode requires a direct HTTPS/HTTP firmware archive URL in TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK." >&2
-              exit 1
-            fi
-            mkdir -p "$FIRM_DIR"
-            curl -fL --retry 3 --retry-delay 2 "$URL" -o "$FIRM_DIR/firmware-download"
-            if [ ! -s "$FIRM_DIR/firmware-download" ]; then
-              echo "Firmware download is empty." >&2
-              exit 1
-            fi
-            echo "Downloaded other-OEM firmware archive. The archive must be extractable by 7-Zip/tar and contain compatible Android partition images."
+          if [ "$FIRMWARE_SOURCE_TYPE" != "OriginOS (direct archive URL)" ]; then
+            echo "Rejected: Quad4Sefi only ports OriginOS donor firmware to a Samsung target." >&2
+            exit 1
           fi
+          URL="$TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK"
+          if [[ ! "$URL" =~ ^https:// ]]; then
+            echo "OriginOS mode requires a direct HTTPS firmware archive URL." >&2
+            exit 1
+          fi
+          mkdir -p "$FIRM_DIR"
+          curl -fL --retry 3 --retry-delay 2 "$URL" -o "$FIRM_DIR/firmware-download"
+          if [ ! -s "$FIRM_DIR/firmware-download" ]; then
+            echo "Firmware download is empty." >&2
+            exit 1
+          fi
+          echo "Downloaded OriginOS donor archive. Next, verify the archive contents and partition compatibility before porting."
 
       - name: Install Dependencies.
         run: |
@@ -286,7 +301,7 @@ jobs:
           rm -rf "$FIRM_DIR"/*.img
 
       - name: Validate extracted Android partitions
-        if: inputs.FIRMWARE_SOURCE_TYPE == 'Other OEM (direct archive URL)'
+        if: inputs.FIRMWARE_SOURCE_TYPE == 'OriginOS (direct archive URL)'
         run: |
           set -euo pipefail
           echo "Checking extracted partition layout for a usable Android system image..."
@@ -298,7 +313,7 @@ jobs:
           echo "Partition presence check passed. This is not a compatibility guarantee: vendor-specific framework, init, SELinux, HAL, kernel and device-tree differences still require manual porting."
 
       - name: Debloat Rom - ${{ inputs.DEBLOAT_ROM }}
-        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
+        if: false # OriginOS donor only; Samsung-ROM-specific patching is intentionally disabled
         run: |
           source "$(pwd)/scripts/debloat.sh"
 
@@ -315,7 +330,7 @@ jobs:
           fi
 
       - name: Apply stock device configuration
-        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
+        if: false # OriginOS donor only; Samsung-ROM-specific patching is intentionally disabled
         run: |
           source "$(pwd)/scripts/debloat.sh"
           source "$(pwd)/scripts/QuantumRom.sh"
@@ -329,7 +344,7 @@ jobs:
           fi
 
       - name: Add china smart manager - ${{ inputs.ADD_CHINA_SMART_MANAGER }}
-        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
+        if: false # OriginOS donor only; Samsung-ROM-specific patching is intentionally disabled
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
 
@@ -338,7 +353,7 @@ jobs:
           fi
 
       - name: Add samsung flagship apps - ${{ inputs.ADD_SAMSUNG_FLAGSHIP_APPS }}
-        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
+        if: false # OriginOS donor only; Samsung-ROM-specific patching is intentionally disabled
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
 
@@ -347,7 +362,7 @@ jobs:
           fi
 
       - name: Add custom features - ${{ inputs.ADD_CUSTOM_FEATURES }}
-        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
+        if: false # OriginOS donor only; Samsung-ROM-specific patching is intentionally disabled
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
 
@@ -356,7 +371,7 @@ jobs:
           fi
 
       - name: Patch flag secure and secure folder - ${{ inputs.PATCH_FLAG_SECURE }} - ${{ inputs.PATCH_SECURE_FOLDER }}
-        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
+        if: false # OriginOS donor only; Samsung-ROM-specific patching is intentionally disabled
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
 
@@ -379,7 +394,7 @@ jobs:
           fi
 
       - name: Patch bluetooth library- ${{ inputs.PATCH_BLUETOOTH_LIBRARY }}
-        if: inputs.FIRMWARE_SOURCE_TYPE == 'Samsung'
+        if: false # OriginOS donor only; Samsung-ROM-specific patching is intentionally disabled
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
 
@@ -390,12 +405,7 @@ jobs:
       - name: Apply others features and patch
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
-          if [ "$FIRMWARE_SOURCE_TYPE" = "Samsung" ]; then
-            PATCH_SELINUX "$FIRM_DIR"
-            DISABLE_SECURITY "$FIRM_DIR"
-          else
-            echo "Skipping Samsung-specific SELinux/security patches for non-Samsung firmware."
-          fi
+          echo "Port direction confirmed: OriginOS firmware from TARGET_DEVICE is the donor (port FROM); STOCK_DEVICE is the Samsung destination (port TO). Samsung-specific integration still requires device-specific porting work."
 
       - name: Build img - ${{ inputs.OUTPUT_FILESYSTEM }}
         run: |
@@ -460,12 +470,7 @@ jobs:
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
           export ANDROID_VERSION=$(GET_PROP "$FIRM_DIR" "system" "ro.system.build.version.release")
-          if [ "$FIRMWARE_SOURCE_TYPE" = "Samsung" ]; then
-            ONEUI_VERSION=$(GET_PROP "$FIRM_DIR" "system" "ro.build.version.oneui")
-            export ONEUI_VERSION="$((ONEUI_VERSION / 10000)).$(((ONEUI_VERSION / 100) % 100))"
-          else
-            export ONEUI_VERSION="N/A (non-Samsung source)"
-          fi
+          export ONEUI_VERSION="OriginOS donor (not One UI)"
           export BUILD_VERSION=$(GET_PROP "$FIRM_DIR" "system" "ro.build.version.incremental")
           export SDK_VERSION=$(GET_PROP "$FIRM_DIR" "system" "ro.system.build.version.sdk")
           export SECURITY_PATCH=$(GET_PROP "$FIRM_DIR" "system" "ro.build.version.security_patch")
